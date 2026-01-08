@@ -1,0 +1,358 @@
+---
+title: Terminal emulation
+pcx_content_type: how-to
+sidebar:
+  order: 8
+description: Build interactive terminal interfaces with PTY sessions.
+---
+
+import { TypeScriptExample } from "~/components";
+
+This guide shows you how to build interactive terminal applications using PTY (pseudo-terminal) sessions with proper terminal emulation.
+
+## When to use PTY
+
+Use PTY sessions when you need:
+
+- **Interactive terminals** - Full terminal emulation with cursor control and colors
+- **Terminal-based applications** - Run vim, htop, nano, or interactive shells
+- **REPL environments** - Python, Node.js, or other interactive interpreters
+- **Real-time collaboration** - Multiple users sharing a terminal session
+- **SSH-like experiences** - Remote terminal access to sandboxed environments
+
+Use command execution (`exec()`) for:
+
+- **Simple scripts** - Non-interactive commands that produce output
+- **Automation** - Batch operations without user interaction
+- **Quick operations** - Commands that run and complete immediately
+
+## Create a PTY session
+
+Create a terminal session with bash:
+
+<TypeScriptExample>
+```
+import { getSandbox } from '@cloudflare/sandbox';
+
+const sandbox = getSandbox(env.Sandbox, 'terminal-session');
+
+const pty = await sandbox.pty.create({
+  cols: 80,
+  rows: 24,
+  command: ['/bin/bash'],
+  cwd: '/workspace'
+});
+
+// Listen for terminal output
+pty.onData((data) => {
+  console.log('Terminal output:', data);
+});
+
+// Send a command
+await pty.write('ls -la\n');
+
+// Wait for exit
+const { exitCode } = await pty.exited;
+console.log('Terminal exited:', exitCode);
+```
+</TypeScriptExample>
+
+## Integrate with xterm.js
+
+Build a web-based terminal using xterm.js:
+
+<TypeScriptExample>
+```
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
+
+// Create xterm.js terminal
+const term = new Terminal({
+  cursorBlink: true,
+  fontSize: 14,
+  fontFamily: 'monospace',
+  theme: {
+    background: '#1e1e1e',
+    foreground: '#d4d4d4'
+  }
+});
+
+const fitAddon = new FitAddon();
+term.loadAddon(fitAddon);
+
+// Mount terminal to DOM
+term.open(document.getElementById('terminal'));
+fitAddon.fit();
+
+// Connect to Worker via WebSocket
+const ws = new WebSocket('wss://your-worker.workers.dev/terminal');
+
+ws.onopen = () => {
+  // Request PTY creation
+  ws.send(JSON.stringify({
+    type: 'create_pty',
+    cols: term.cols,
+    rows: term.rows
+  }));
+};
+
+// Forward xterm.js input to PTY
+term.onData((data) => {
+  ws.send(JSON.stringify({
+    type: 'pty_input',
+    data
+  }));
+});
+
+// Forward PTY output to xterm.js
+ws.onmessage = (event) => {
+  const message = JSON.parse(event.data);
+
+  if (message.type === 'pty_output') {
+    term.write(message.data);
+  } else if (message.type === 'pty_exit') {
+    term.write(`\r\n[Process exited: ${message.exitCode}]\r\n`);
+  }
+};
+
+// Handle terminal resize
+window.addEventListener('resize', () => {
+  fitAddon.fit();
+  ws.send(JSON.stringify({
+    type: 'pty_resize',
+    cols: term.cols,
+    rows: term.rows
+  }));
+});
+```
+</TypeScriptExample>
+
+## Worker WebSocket handler
+
+Handle PTY operations via WebSocket:
+
+<TypeScriptExample>
+```
+import { getSandbox } from '@cloudflare/sandbox';
+
+export { Sandbox } from '@cloudflare/sandbox';
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader !== 'websocket') {
+      return new Response('Expected WebSocket', { status: 426 });
+    }
+
+    const { 0: client, 1: server } = new WebSocketPair();
+
+    const sandbox = getSandbox(env.Sandbox, 'terminal');
+    let pty: Awaited<ReturnType<typeof sandbox.pty.create>> | null = null;
+
+    server.accept();
+
+    server.addEventListener('message', async (event) => {
+      const message = JSON.parse(event.data as string);
+
+      switch (message.type) {
+        case 'create_pty':
+          pty = await sandbox.pty.create({
+            cols: message.cols,
+            rows: message.rows
+          });
+
+          // Forward PTY output to client
+          pty.onData((data) => {
+            server.send(JSON.stringify({
+              type: 'pty_output',
+              data
+            }));
+          });
+
+          // Notify client of exit
+          pty.onExit((exitCode) => {
+            server.send(JSON.stringify({
+              type: 'pty_exit',
+              exitCode
+            }));
+          });
+          break;
+
+        case 'pty_input':
+          if (pty) {
+            await pty.write(message.data);
+          }
+          break;
+
+        case 'pty_resize':
+          if (pty) {
+            await pty.resize(message.cols, message.rows);
+          }
+          break;
+      }
+    });
+
+    server.addEventListener('close', () => {
+      if (pty) {
+        pty.close();
+      }
+    });
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+};
+```
+</TypeScriptExample>
+
+## Handle terminal control sequences
+
+PTY sessions support ANSI escape sequences for cursor control, colors, and formatting:
+
+<TypeScriptExample>
+```
+// Send colored output
+await pty.write('\x1b[32mSuccess!\x1b[0m\n'); // Green text
+
+// Clear screen
+await pty.write('\x1b[2J\x1b[H');
+
+// Move cursor to position (row 5, col 10)
+await pty.write('\x1b[5;10H');
+
+// Send Ctrl+C (SIGINT)
+await pty.write('\x03');
+
+// Send Ctrl+D (EOF)
+await pty.write('\x04');
+```
+</TypeScriptExample>
+
+## Run interactive applications
+
+Launch terminal-based applications:
+
+<TypeScriptExample>
+```
+// Python REPL
+const python = await sandbox.pty.create({
+  cols: 80,
+  rows: 24,
+  command: ['python3']
+});
+
+python.onData((data) => console.log(data));
+await python.write('print("Hello from Python")\n');
+
+// Vim editor
+const vim = await sandbox.pty.create({
+  command: ['vim', 'config.json']
+});
+
+vim.onData((data) => terminal.write(data));
+
+// Send vim commands
+await vim.write('i'); // Insert mode
+await vim.write('Hello, World!');
+await vim.write('\x1b'); // Escape key
+await vim.write(':wq\n'); // Save and quit
+
+// Wait for vim to exit
+await vim.exited;
+```
+</TypeScriptExample>
+
+## Build collaborative terminals
+
+Multiple users sharing one PTY session:
+
+<TypeScriptExample>
+```
+// Worker with Durable Object for state
+export class CollaborativeTerminal {
+  private pty: any = null;
+  private clients: Set<WebSocket> = new Set();
+
+  async fetch(request: Request): Promise<Response> {
+    const { 0: client, 1: server } = new WebSocketPair();
+    server.accept();
+
+    this.clients.add(server);
+
+    // Create PTY on first connection
+    if (this.clients.size === 1) {
+      const sandbox = getSandbox(this.env.Sandbox, this.ctx.id.toString());
+
+      this.pty = await sandbox.pty.create({ cols: 80, rows: 24 });
+
+      // Broadcast output to all clients
+      this.pty.onData((data: string) => {
+        const message = JSON.stringify({ type: 'output', data });
+        for (const client of this.clients) {
+          client.send(message);
+        }
+      });
+    }
+
+    // Handle input from any client
+    server.addEventListener('message', async (event) => {
+      const message = JSON.parse(event.data as string);
+
+      if (message.type === 'input') {
+        await this.pty.write(message.data);
+      }
+    });
+
+    server.addEventListener('close', () => {
+      this.clients.delete(server);
+
+      // Clean up when last client disconnects
+      if (this.clients.size === 0 && this.pty) {
+        this.pty.close();
+        this.pty = null;
+      }
+    });
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+}
+```
+</TypeScriptExample>
+
+## Reconnect to existing sessions
+
+Resume a PTY session after disconnect:
+
+<TypeScriptExample>
+```
+// Store PTY ID in Durable Object state
+const pty = await sandbox.pty.create({ cols: 80, rows: 24 });
+await this.ctx.storage.put('ptyId', pty.id);
+
+// Later: reconnect after client disconnect
+const ptyId = await this.ctx.storage.get('ptyId');
+if (ptyId) {
+  const pty = await sandbox.pty.getById(ptyId);
+  pty.onData((data) => client.send(data));
+}
+```
+</TypeScriptExample>
+
+## Best practices
+
+- **Always handle onData** - Terminal output is continuous, subscribe immediately after creation
+- **Resize on viewport changes** - Call `resize()` when browser window size changes
+- **Forward control sequences** - Send raw input from xterm.js without modification
+- **Handle exit gracefully** - Use `onExit()` to detect process termination
+- **Use WebSocket transport** - PTY requires real-time bidirectional communication
+- **Clean up sessions** - Call `close()` when detaching, `kill()` when terminating
+
+## Related resources
+
+- [PTY API reference](/sandbox/api/pty/) - Complete PTY API documentation
+- [WebSocket connections guide](/sandbox/guides/websocket-connections/) - WebSocket patterns
+- [Commands API](/sandbox/api/commands/) - Non-interactive command execution
+- [Sessions API](/sandbox/api/sessions/) - Session management
