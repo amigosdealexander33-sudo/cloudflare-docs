@@ -120,6 +120,42 @@ With Sandbox, you can execute Python scripts, run Node.js applications, analyze 
 		```
 	</TabItem>
 
+	<TabItem label="Interactive Terminal">
+		```typescript
+		import { getSandbox } from '@cloudflare/sandbox';
+
+		export { Sandbox } from '@cloudflare/sandbox';
+
+		export default {
+			async fetch(request: Request, env: Env): Promise<Response> {
+				const sandbox = getSandbox(env.Sandbox, 'user-123', {
+					useWebSocket: true
+				});
+
+				// Create interactive terminal with PTY support
+				const pty = await sandbox.pty.create({
+					cols: 80,
+					rows: 24
+				});
+
+				// Subscribe to terminal output
+				pty.onData((data) => {
+					console.log('Terminal output:', data);
+				});
+
+				// Send commands to terminal
+				await pty.write('ls -la\n');
+				await pty.write('echo "Hello from sandbox"\n');
+
+				return Response.json({
+					ptyId: pty.id,
+					message: 'Terminal session created'
+				});
+			}
+		};
+		```
+	</TabItem>
+
 	<TabItem label="WebSocket Connections">
 		```typescript
 		import { getSandbox } from '@cloudflare/sandbox';
@@ -158,6 +194,12 @@ With Sandbox, you can execute Python scripts, run Node.js applications, analyze 
 <Feature header="Execute commands securely" href="/sandbox/guides/execute-commands/" cta="Learn about command execution">
 
 Run shell commands, Python scripts, Node.js applications, and more with streaming output support and automatic timeout handling.
+
+</Feature>
+
+<Feature header="Build interactive terminals" href="/sandbox/guides/interactive-terminals/" cta="Learn about PTY support">
+
+Create real-time terminal interfaces with PTY support. Build collaborative terminals, interactive shells, and terminal-based applications with xterm.js integration.
 
 </Feature>
 

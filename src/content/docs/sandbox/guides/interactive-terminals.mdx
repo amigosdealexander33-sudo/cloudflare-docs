@@ -1,0 +1,588 @@
+---
+title: Build interactive terminals
+pcx_content_type: how-to
+sidebar:
+  order: 3
+description: Create real-time terminal interfaces with PTY support, WebSocket streaming, and xterm.js integration.
+---
+
+import { TypeScriptExample } from "~/components";
+
+This guide shows you how to build interactive terminal applications using the Sandbox SDK's PTY (pseudo-terminal) API.
+
+## When to use PTY
+
+Use PTY when you need:
+
+- **Interactive terminal applications**: Text editors (`vim`, `nano`), interactive shells, or TUI applications
+- **Terminal control sequences**: Color output, cursor movement, or screen clearing
+- **Bidirectional real-time communication**: Immediate input/output for responsive user experience
+- **Terminal-aware applications**: Tools that adapt to terminal dimensions
+
+For simple command execution without terminal interaction, use [`exec()`](/sandbox/api/commands/#exec) instead.
+
+## Basic terminal setup
+
+Create a PTY session and connect to terminal output:
+
+<TypeScriptExample>
+```
+import { getSandbox } from '@cloudflare/sandbox';
+
+const sandbox = getSandbox(env.Sandbox, 'my-sandbox', {
+  useWebSocket: true // PTY requires WebSocket transport
+});
+
+// Create interactive bash shell
+const pty = await sandbox.pty.create({
+  cols: 80,
+  rows: 24,
+  command: ['/bin/bash']
+});
+
+// Subscribe to terminal output
+pty.onData((data) => {
+  console.log('Output:', data);
+});
+
+// Send commands
+await pty.write('echo "Hello from PTY"\n');
+await pty.write('ls -la\n');
+
+// Wait for exit
+const { exitCode } = await pty.exited;
+console.log('Shell exited with code:', exitCode);
+```
+</TypeScriptExample>
+
+## Integrate with xterm.js
+
+Build a web-based terminal UI using xterm.js:
+
+<TypeScriptExample>
+```
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
+
+// Create xterm.js terminal
+const term = new Terminal({
+  cursorBlink: true,
+  theme: {
+    background: '#1e1e1e',
+    foreground: '#d4d4d4'
+  }
+});
+
+const fitAddon = new FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal'));
+fitAddon.fit();
+
+// Create PTY with terminal dimensions
+const pty = await sandbox.pty.create({
+  cols: term.cols,
+  rows: term.rows
+});
+
+// Forward PTY output to terminal
+pty.onData((data) => {
+  term.write(data);
+});
+
+// Forward user input to PTY
+term.onData((data) => {
+  pty.write(data);
+});
+
+// Handle terminal resize
+term.onResize(({ cols, rows }) => {
+  pty.resize(cols, rows);
+});
+
+window.addEventListener('resize', () => {
+  fitAddon.fit();
+});
+
+// Handle process exit
+pty.onExit((exitCode) => {
+  term.writeln(`\r\n[Process exited with code ${exitCode}]`);
+  term.setOption('disableStdin', true);
+});
+```
+</TypeScriptExample>
+
+## Handle terminal resize
+
+Respond to window size changes and update PTY dimensions:
+
+<TypeScriptExample>
+```
+const fitAddon = new FitAddon();
+term.loadAddon(fitAddon);
+
+// Initial fit
+fitAddon.fit();
+
+// Update PTY dimensions when terminal resizes
+const resizeObserver = new ResizeObserver(() => {
+  fitAddon.fit();
+
+  // Notify PTY of new dimensions
+  pty.resize(term.cols, term.rows).catch(err => {
+    console.error('Resize failed:', err);
+  });
+});
+
+resizeObserver.observe(terminalContainer);
+
+// Cleanup
+function cleanup() {
+  resizeObserver.disconnect();
+  pty.close();
+}
+```
+</TypeScriptExample>
+
+## Run interactive applications
+
+Launch text editors, interactive shells, or TUI applications:
+
+<TypeScriptExample>
+```
+// Launch vim editor
+const vimPty = await sandbox.pty.create({
+  cols: 120,
+  rows: 40,
+  command: ['/usr/bin/vim', 'README.md'],
+  cwd: '/home/user/project'
+});
+
+vimPty.onData((data) => {
+  terminal.write(data);
+});
+
+// Launch Python REPL
+const pythonPty = await sandbox.pty.create({
+  cols: 80,
+  rows: 24,
+  command: ['/usr/bin/python3', '-i'],
+  env: {
+    PYTHONUNBUFFERED: '1'
+  }
+});
+
+// Launch htop (process monitor)
+const htopPty = await sandbox.pty.create({
+  cols: 160,
+  rows: 50,
+  command: ['/usr/bin/htop']
+});
+```
+</TypeScriptExample>
+
+## Connect WebSocket to PTY
+
+Set up WebSocket communication between browser and Worker:
+
+### Worker code
+
+<TypeScriptExample>
+```
+export default {
+  async fetch(request, env) {
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader !== 'websocket') {
+      return new Response('Expected websocket', { status: 426 });
+    }
+
+    const webSocketPair = new WebSocketPair();
+    const [client, server] = Object.values(webSocketPair);
+
+    server.accept();
+
+    // Get sandbox and create PTY
+    const sandbox = getSandbox(env.Sandbox, 'terminal-session', {
+      useWebSocket: true
+    });
+
+    const pty = await sandbox.pty.create({
+      cols: 80,
+      rows: 24
+    });
+
+    // Forward PTY output to WebSocket
+    pty.onData((data) => {
+      server.send(JSON.stringify({ type: 'output', data }));
+    });
+
+    pty.onExit((exitCode) => {
+      server.send(JSON.stringify({ type: 'exit', exitCode }));
+    });
+
+    // Handle WebSocket messages
+    server.addEventListener('message', async (event) => {
+      const msg = JSON.parse(event.data);
+
+      switch (msg.type) {
+        case 'input':
+          await pty.write(msg.data);
+          break;
+        case 'resize':
+          await pty.resize(msg.cols, msg.rows);
+          break;
+        case 'kill':
+          await pty.kill(msg.signal);
+          break;
+      }
+    });
+
+    server.addEventListener('close', () => {
+      pty.close();
+    });
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+};
+```
+</TypeScriptExample>
+
+### Client code
+
+<TypeScriptExample>
+```
+const ws = new WebSocket(`wss://${location.host}/terminal`);
+
+ws.onopen = () => {
+  console.log('Connected to terminal');
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+
+  switch (msg.type) {
+    case 'output':
+      terminal.write(msg.data);
+      break;
+    case 'exit':
+      terminal.writeln(`\r\n[Exited: ${msg.exitCode}]`);
+      ws.close();
+      break;
+  }
+};
+
+// Send terminal input
+terminal.onData((data) => {
+  ws.send(JSON.stringify({ type: 'input', data }));
+});
+
+// Send resize events
+terminal.onResize(({ cols, rows }) => {
+  ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+});
+```
+</TypeScriptExample>
+
+## Support multiple users
+
+Build collaborative terminals where multiple users share the same PTY session:
+
+<TypeScriptExample>
+```
+// Store PTY globally (use Durable Object in production)
+let sharedPty = null;
+const connectedClients = new Set();
+
+server.accept();
+
+// Create or reuse PTY
+if (!sharedPty) {
+  sharedPty = await sandbox.pty.create({
+    cols: 80,
+    rows: 24
+  });
+
+  // Broadcast output to all clients
+  sharedPty.onData((data) => {
+    for (const client of connectedClients) {
+      client.send(JSON.stringify({ type: 'output', data }));
+    }
+  });
+}
+
+connectedClients.add(server);
+
+// Handle input from any client
+server.addEventListener('message', async (event) => {
+  const msg = JSON.parse(event.data);
+
+  if (msg.type === 'input') {
+    await sharedPty.write(msg.data);
+
+    // Notify others who's typing
+    for (const client of connectedClients) {
+      if (client !== server) {
+        client.send(JSON.stringify({ type: 'user_typing' }));
+      }
+    }
+  }
+});
+
+server.addEventListener('close', () => {
+  connectedClients.delete(server);
+
+  // Clean up PTY when last user disconnects
+  if (connectedClients.size === 0) {
+    sharedPty.close();
+    sharedPty = null;
+  }
+});
+```
+</TypeScriptExample>
+
+## Send control sequences
+
+Send keyboard shortcuts and control characters:
+
+<TypeScriptExample>
+```
+// Ctrl+C (interrupt)
+await pty.write('\x03');
+
+// Ctrl+D (EOF)
+await pty.write('\x04');
+
+// Ctrl+Z (suspend)
+await pty.write('\x1a');
+
+// Arrow keys
+await pty.write('\x1b[A'); // Up arrow
+await pty.write('\x1b[B'); // Down arrow
+await pty.write('\x1b[C'); // Right arrow
+await pty.write('\x1b[D'); // Left arrow
+
+// Tab completion
+await pty.write('\t');
+
+// Enter
+await pty.write('\r');
+
+// Escape
+await pty.write('\x1b');
+```
+</TypeScriptExample>
+
+## Manage PTY lifecycle
+
+Handle PTY creation, reconnection, and cleanup:
+
+<TypeScriptExample>
+```
+// Create PTY and store ID
+const pty = await sandbox.pty.create({
+  cols: 80,
+  rows: 24
+});
+const ptyId = pty.id;
+
+// Later: reconnect to same PTY
+const reconnected = await sandbox.pty.getById(ptyId);
+reconnected.onData((data) => terminal.write(data));
+
+// List all active PTYs
+const { ptys } = await sandbox.pty.list();
+for (const info of ptys) {
+  console.log(`PTY ${info.id}: ${info.cols}x${info.rows}`);
+}
+
+// Graceful shutdown
+await pty.kill('SIGTERM');
+
+// Force kill if needed
+setTimeout(async () => {
+  await pty.kill('SIGKILL');
+}, 5000);
+```
+</TypeScriptExample>
+
+## Handle errors
+
+Catch and handle PTY operation errors:
+
+<TypeScriptExample>
+```
+try {
+  const pty = await sandbox.pty.create({
+    cols: 80,
+    rows: 24
+  });
+} catch (error) {
+  console.error('Failed to create PTY:', error.message);
+  // Show error UI to user
+}
+
+// Handle write errors (PTY closed or process exited)
+pty.onData((data) => terminal.write(data));
+
+try {
+  await pty.write('ls -la\n');
+} catch (error) {
+  console.error('Write failed:', error.message);
+  terminal.writeln('\r\n[Connection lost]');
+}
+
+// Handle resize errors (invalid dimensions)
+terminal.onResize(async ({ cols, rows }) => {
+  // Validate before sending
+  const validCols = Math.max(1, Math.min(1000, cols));
+  const validRows = Math.max(1, Math.min(1000, rows));
+
+  try {
+    await pty.resize(validCols, validRows);
+  } catch (error) {
+    console.error('Resize failed:', error.message);
+  }
+});
+```
+</TypeScriptExample>
+
+## Attach to sessions
+
+Inherit environment and working directory from existing sessions:
+
+<TypeScriptExample>
+```
+// Create session with custom environment
+const session = await sandbox.sessions.create({
+  cwd: '/home/user/project',
+  env: {
+    NODE_ENV: 'development',
+    API_KEY: 'secret'
+  }
+});
+
+// Attach PTY to session
+const pty = await sandbox.pty.attach(session.id, {
+  cols: 80,
+  rows: 24
+});
+
+// PTY inherits /home/user/project as cwd
+// PTY inherits NODE_ENV and API_KEY env vars
+pty.onData((data) => terminal.write(data));
+```
+</TypeScriptExample>
+
+## Script interactive sessions
+
+Automate interactive applications programmatically:
+
+<TypeScriptExample>
+```
+// Launch Python REPL and execute commands
+const pty = await sandbox.pty.create({
+  command: ['/usr/bin/python3', '-i'],
+  cols: 80,
+  rows: 24
+});
+
+let outputBuffer = '';
+
+pty.onData((data) => {
+  outputBuffer += data;
+  console.log('Python:', data);
+});
+
+// Wait for prompt
+await new Promise(resolve => setTimeout(resolve, 500));
+
+// Send Python commands
+await pty.write('import math\n');
+await new Promise(resolve => setTimeout(resolve, 100));
+
+await pty.write('print(math.pi)\n');
+await new Promise(resolve => setTimeout(resolve, 100));
+
+await pty.write('exit()\n');
+
+// Wait for completion
+const { exitCode } = await pty.exited;
+console.log('Session output:', outputBuffer);
+```
+</TypeScriptExample>
+
+## Full example
+
+Complete implementation of a collaborative terminal:
+
+<TypeScriptExample>
+```
+// Worker
+export default {
+  async fetch(request, env) {
+    if (request.headers.get('Upgrade') === 'websocket') {
+      return handleWebSocket(request, env);
+    }
+    return new Response('WebSocket required', { status: 426 });
+  }
+};
+
+async function handleWebSocket(request, env) {
+  const [client, server] = Object.values(new WebSocketPair());
+  server.accept();
+
+  const sandbox = getSandbox(env.Sandbox, 'terminal', {
+    useWebSocket: true
+  });
+
+  let pty = null;
+
+  server.addEventListener('message', async (event) => {
+    const msg = JSON.parse(event.data);
+
+    switch (msg.type) {
+      case 'start':
+        pty = await sandbox.pty.create({
+          cols: msg.cols,
+          rows: msg.rows
+        });
+
+        pty.onData((data) => {
+          server.send(JSON.stringify({ type: 'output', data }));
+        });
+
+        pty.onExit((exitCode) => {
+          server.send(JSON.stringify({ type: 'exit', exitCode }));
+        });
+
+        server.send(JSON.stringify({ type: 'ready', id: pty.id }));
+        break;
+
+      case 'input':
+        await pty?.write(msg.data);
+        break;
+
+      case 'resize':
+        await pty?.resize(msg.cols, msg.rows);
+        break;
+    }
+  });
+
+  server.addEventListener('close', () => {
+    pty?.close();
+  });
+
+  return new Response(null, { status: 101, webSocket: client });
+}
+```
+</TypeScriptExample>
+
+## Related resources
+
+- [PTY API Reference](/sandbox/api/pty/) - Complete PTY API documentation
+- [WebSocket Transport](/sandbox/configuration/websocket/) - WebSocket configuration and reconnection
+- [Sessions API](/sandbox/api/sessions/) - Manage execution contexts
+- [Commands API](/sandbox/api/commands/) - For non-interactive command execution
