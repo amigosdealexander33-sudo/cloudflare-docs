@@ -1,0 +1,18 @@
+---
+{}
+---
+
+R2 charges based on the total volume of data stored, along with two classes of operations on that data:
+
+1. **Class A operations** which are more expensive and tend to mutate state.
+2. **Class B operations** which tend to read existing state.
+
+There are no charges for egress bandwidth.
+
+|                                    | Free                        | Standard storage         | Infrequent Access storage |
+| ---------------------------------- | --------------------------- | ------------------------ | ------------------------- |
+| Storage                            | 10 GB-month / month         | $0.015 / GB-month        | $0.01 / GB-month          |
+| Class A Operations                 | 1 million requests / month  | $4.50 / million requests | $9.00 / million requests  |
+| Class B Operations                 | 10 million requests / month | $0.36 / million requests | $0.90 / million requests  |
+| Data Retrieval (processing)        | None                        | None                     | $0.01 / GB                |
+| Egress (data transfer to Internet) | Free                        | Free                     | Free                      |
